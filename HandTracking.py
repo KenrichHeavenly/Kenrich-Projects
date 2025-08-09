@@ -371,7 +371,7 @@ def main():
         cv2.putText(frame, f"FPS: {fps_avg:0.1f}", (10, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-        cv2.imshow("Two-Hand Gesture Mouse (Press ESC to quit)", frame)
+        cv2.imshow("Two-Hand Gesture Mouse (Press ESC to quit this screen)", frame)
         if (cv2.waitKey(1) & 0xFF) == 27:
             break
 
