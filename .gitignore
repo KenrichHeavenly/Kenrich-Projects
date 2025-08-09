@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+dist/
+build/
+*.log
