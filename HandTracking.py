@@ -1,5 +1,5 @@
 # =========================
-# Two-Hand Gesture Mouse (No Lock)
+# Two-Hand Gesture Mouse
 # - One hand = cursor
 # - Other hand = gestures (click/drag, right-click, scroll)
 # OpenCV + MediaPipe + Kalman + Smooth Scroll
@@ -31,7 +31,7 @@ SCREEN_W, SCREEN_H = pyautogui.size()
 CURSOR_HAND  = "Right"
 GESTURE_HAND = "Left"
 
-# If the chosen hand is not visible, optionally fall back:
+# If the chosen hand is not visible, we can optionally fall back:
 FALLBACK_TO_SINGLE_HAND = True   # if only one hand is seen, use it for both
 
 # Camera (macOS → AVFoundation)
@@ -44,6 +44,10 @@ DRAW_LANDMARKS = False
 # Gestures (scale-normalized thresholds)
 PINCH_LEFT  = {"down": 0.26, "up": 0.40}   # thumb–index for left click/drag (hysteresis)
 PINCH_RIGHT = {"down": 0.30, "up": 0.44}   # thumb–middle for right click
+
+# Cursor lock during drag
+LOCK_DEADZONE_PX = 14    # set 9999 for hard lock
+LOCK_RELEASE_DUR = 0.08  # to prevent flicker on brief pinch drop
 
 # Smooth scroll (slow + steady)
 SCROLL_DEADZONE  = 0.015   # ignore tiny wobble
@@ -217,7 +221,10 @@ def main():
     # Filters / states
     kf = Kalman2D(process_var=KALMAN_PROCESS_VAR, meas_var=KALMAN_MEAS_VAR)
 
-    left_down = False            # mouse left button state (for drag)
+    dragging = False
+    lock_active = False
+    lock_pos = (0,0)
+    last_pinch_break = 0.0
     right_click_cooldown = 0.0
     prev_t = time.time()
     fps_avg = 0.0
@@ -255,8 +262,13 @@ def main():
                 hands_dict[label] = dict(lm_px=lm_px, lm=hand_lms, scale=sc, nx=nx, ny=ny)
 
         # Decide which streams to use
-        use_cursor = hands_dict.get(CURSOR_HAND)
-        use_gesture = hands_dict.get(GESTURE_HAND)
+        use_cursor = None
+        use_gesture = None
+
+        if CURSOR_HAND in hands_dict:
+            use_cursor = hands_dict[CURSOR_HAND]
+        if GESTURE_HAND in hands_dict:
+            use_gesture = hands_dict[GESTURE_HAND]
 
         # Fallbacks (if only one hand present or the selected hand missing)
         if FALLBACK_TO_SINGLE_HAND:
@@ -279,9 +291,10 @@ def main():
             kf.predict(dt)
             kf.update((target_x, target_y))
             cx, cy = map(int, kf.get())
+            # Only move when not locked
             # Require index finger up on cursor hand for movement (reduces accidental motion)
             ext_c = fingers_extended_by_angle(use_cursor["lm_px"], handed=CURSOR_HAND)
-            if ext_c[1]:  # index
+            if not lock_active and ext_c[1]:  # index
                 pyautogui.moveTo(cx, cy)
 
         # --------------- GESTURES ---------------
@@ -300,7 +313,7 @@ def main():
             d_tm = dist(4,12) / scale_g  # thumb-middle
 
             # instantaneous flags
-            pinch_left_now  = d_ti < (PINCH_LEFT["down"] if not left_down else PINCH_LEFT["up"])
+            pinch_left_now  = d_ti < (PINCH_LEFT["down"] if not dragging else PINCH_LEFT["up"])
             pinch_right_now = d_tm < PINCH_RIGHT["down"]
             scroll_now = (index_up_g and middle_up_g) and (not pinch_left_now)
 
@@ -313,21 +326,37 @@ def main():
             pinch_right_stable = (sum(votes_pinch_right) >= STABLE_K)
             scroll_mode_stable = (sum(votes_scroll_mode) >= STABLE_K)
 
-            # ---- LEFT CLICK / DRAG (no lock) ----
-            if pinch_left_stable and not left_down:
+            # ---- Left click/drag (from gesture hand) ----
+            if pinch_left_stable and not dragging:
                 pyautogui.mouseDown()
-                left_down = True
-            elif (not pinch_left_stable) and left_down:
-                pyautogui.mouseUp()
-                left_down = False
+                dragging = True
+                lock_active = True
+                # lock at CURRENT cursor position to avoid jump
+                cur_pos = pyautogui.position()
+                lock_pos = (cur_pos.x, cur_pos.y)
+                pyautogui.moveTo(lock_pos[0], lock_pos[1])
 
-            # ---- RIGHT CLICK (edge + cooldown) ----
+            if lock_active:
+                # keep cursor pinned unless it strays far (safety bailout)
+                cur_pos = pyautogui.position()
+                if math.hypot(cur_pos.x - lock_pos[0], cur_pos.y - lock_pos[1]) <= LOCK_DEADZONE_PX:
+                    pyautogui.moveTo(lock_pos[0], lock_pos[1])
+
+            if (not pinch_left_stable) and dragging:
+                last_pinch_break = now
+                pyautogui.mouseUp()
+                dragging = False
+
+            if lock_active and (not dragging) and (now - last_pinch_break > LOCK_RELEASE_DUR):
+                lock_active = False
+
+            # ---- Right click (gesture hand) ----
             if pinch_right_stable and (now - right_click_cooldown > 0.28):
                 pyautogui.click(button='right')
                 right_click_cooldown = now
 
             # ---- Smooth scroll (gesture hand) ----
-            if scroll_mode_stable and (not left_down):
+            if scroll_mode_stable and (not dragging) and (not lock_active):
                 t_now = now
                 dts = max(1e-3, t_now - last_scroll_t)
                 last_scroll_t = t_now
@@ -355,13 +384,13 @@ def main():
             # HUD (optional)
             cv2.putText(frame, f"Cursor={CURSOR_HAND if use_cursor else '—'}  Gestures={GESTURE_HAND if use_gesture else '—'}",
                         (10, h-55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-            cv2.putText(frame, f"Dragging={left_down}", (10, h-30),
+            cv2.putText(frame, f"Lock={lock_active} Drag={dragging}", (10, h-30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
         else:
             # If neither hand present, reset
-            if left_down: 
-                pyautogui.mouseUp()
-                left_down = False
+            if dragging: pyautogui.mouseUp()
+            dragging = False
+            lock_active = False
             votes_pinch_left.clear(); votes_pinch_right.clear(); votes_scroll_mode.clear()
 
         # FPS overlay
@@ -375,8 +404,6 @@ def main():
         if (cv2.waitKey(1) & 0xFF) == 27:
             break
 
-    if left_down:
-        pyautogui.mouseUp()
     grab.release()
     cv2.destroyAllWindows()
 
